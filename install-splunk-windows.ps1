@@ -8,7 +8,7 @@
 # --- CONFIGURATION ---
 $SPLUNK_SERVER_IP = "172.20.242.20"
 $SPLUNK_RECEIVE_PORT = "9997"
-$MSI_URL = "https://download.splunk.com/products/universalforwarder/releases/10.2.0/windows/splunkforwarder-10.2.0-d749cb17ea65-x64-release.msi"
+$MSI_URL = "https://download.splunk.com/products/universalforwarder/releases/10.2.0/windows/splunkforwarder-10.2.0-d749cb17ea65-windows-x64.msi"
 $TEMP_MSI = "$env:TEMP\splunk_uf.msi"
 
 # --- Credentials (For Splunk Local Admin) ---
