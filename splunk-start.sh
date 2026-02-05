@@ -122,6 +122,20 @@ sudo -u "$SPLUNK_OS_USER" "$SPLUNK_HOME/bin/splunk" restart -auth "${UF_ADMIN}:$
 echo ""
 echo "[+] Done."
 echo "    UF Home:     $SPLUNK_HOME"
+
+
 echo "    Forwarding:  ${SPLUNK_SERVER_IP}:${SPLUNK_RECEIVE_PORT}"
 echo "    Service:     systemctl status SplunkForwarder"
 echo "    Verify:      sudo -u $SPLUNK_OS_USER $SPLUNK_HOME/bin/splunk list forward-server -auth ${UF_ADMIN}:******"
+
+
+sudo /opt/splunkforwarder/bin/splunk stop
+
+
+sudo /opt/splunkforwarder/bin/splunk enable boot-start -user splunk --accept-license --answer-yes --no-prompt
+
+sudo systemctl daemon-reload
+sudo systemctl enable SplunkForwarder
+sudo systemctl start SplunkForwarder
+
+sudo systemctl status SplunkForwarder
