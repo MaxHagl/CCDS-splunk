@@ -75,3 +75,9 @@ echo "--------------------------------------------------"
 echo "Installation complete."
 echo "Service Status: $(systemctl is-active SplunkForwarder)"
 echo "--------------------------------------------------"
+
+
+sudo systemctl daemon-reload
+sudo systemctl enable SplunkForwarder
+sudo systemctl start SplunkForwarder
+sudo systemctl status SplunkForwarder
