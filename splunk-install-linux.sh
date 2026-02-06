@@ -24,7 +24,6 @@ need_root() {
 have() { command -v "$1" &>/dev/null; }
 
 pkg_install() {
-  # Installs minimal deps across common distros
   if have apt-get; then
     apt-get update -y >/dev/null
     apt-get install -y curl tar netcat-openbsd libcap2-bin >/dev/null
@@ -35,6 +34,17 @@ pkg_install() {
   else
     log "[!] No supported package manager found. Ensure curl, tar, nc, setcap exist."
   fi
+}
+
+detect_splunk_unit() {
+  # Splunk may create different unit names; detect any existing one
+  local unit=""
+  unit="$(systemctl list-unit-files --type=service 2>/dev/null | awk '{print $1}' | grep -Ei '^splunk.*(forwarder|universal).*\.service$' | head -n1 || true)"
+  if [[ -z "$unit" ]]; then
+    # sometimes "SplunkForwarder.service" exists
+    unit="$(systemctl list-unit-files --type=service 2>/dev/null | awk '{print $1}' | grep -E '^SplunkForwarder\.service$' | head -n1 || true)"
+  fi
+  echo "$unit"
 }
 
 stop_any_splunk() {
@@ -52,7 +62,6 @@ stop_any_splunk() {
   pkill -9 splunkd 2>/dev/null || true
   pkill -9 splunk 2>/dev/null || true
 
-  # Remove common unit file paths (best-effort)
   rm -f /etc/systemd/system/SplunkForwarder.service 2>/dev/null || true
   rm -f /etc/systemd/system/splunkforwarder.service 2>/dev/null || true
   systemctl daemon-reload 2>/dev/null || true
@@ -68,7 +77,6 @@ purge_install() {
     rm -rf "$INSTALL_DIR"
   fi
 
-  # Remove splunk user/group if exists (optional but helpful for "stuck" permissions)
   if id "$SPLUNK_USER" >/dev/null 2>&1; then
     log "[*] Removing user $SPLUNK_USER"
     userdel -r -f "$SPLUNK_USER" 2>/dev/null || true
@@ -80,7 +88,6 @@ purge_install() {
 
 create_user() {
   log "[*] Creating service user $SPLUNK_USER"
-  # Home should NOT be /opt/splunkforwarder (avoid conflicts with extraction)
   useradd -r -m -d "/home/$SPLUNK_USER" -s /sbin/nologin "$SPLUNK_USER"
 }
 
@@ -108,20 +115,19 @@ USERNAME = $UF_ADMIN
 PASSWORD = $UF_PASS
 EOF
 
-  # Export for later use (validation only)
   export UF_ADMIN UF_PASS
 }
 
 write_outputs_inputs() {
-  log "[*] Writing outputs.conf (this guarantees a forward server is configured)..."
+  log "[*] Writing outputs.conf (minimal + valid)..."
 
+  # IMPORTANT: remove autoLB (it caused "Invalid key" in your UF build)
   cat > "$INSTALL_DIR/etc/system/local/outputs.conf" <<EOF
 [tcpout]
 defaultGroup = primary_indexer
 
 [tcpout:primary_indexer]
 server = ${SPLUNK_SERVER}:${SPLUNK_PORT}
-autoLB = false
 EOF
 
   log "[*] Writing inputs.conf monitors (Ubuntu + Fedora/RHEL + audit)..."
@@ -161,18 +167,15 @@ fix_permissions_caps() {
 
   chown -R "$SPLUNK_USER:$SPLUNK_USER" "$INSTALL_DIR"
 
-  # Ensure setcap exists
   if ! have setcap; then
     log "[!] setcap not found; installing deps..."
     pkg_install
   fi
 
-  # Set cap on splunkd (daemon), not the CLI wrapper
   if [[ -x "$INSTALL_DIR/bin/splunkd" ]]; then
     setcap 'cap_dac_read_search+ep' "$INSTALL_DIR/bin/splunkd" || true
   fi
 
-  # Fedora often logs auth to /var/log/secure only if rsyslog is running
   if systemctl list-unit-files | grep -qi '^rsyslog\.service'; then
     systemctl enable --now rsyslog >/dev/null 2>&1 || true
   fi
@@ -185,10 +188,19 @@ start_and_enable() {
   log "[*] Enabling boot-start (systemd)..."
   "$INSTALL_DIR/bin/splunk" enable boot-start -user "$SPLUNK_USER" --accept-license --answer-yes --no-prompt
 
-  # Start via systemd if unit exists
   systemctl daemon-reload || true
-  systemctl enable SplunkForwarder 2>/dev/null || true
-  systemctl restart SplunkForwarder 2>/dev/null || true
+
+  # Restart the actual unit name if one exists; otherwise, just CLI restart
+  local unit
+  unit="$(detect_splunk_unit)"
+  if [[ -n "$unit" ]]; then
+    log "[*] Detected systemd unit: $unit"
+    systemctl enable "$unit" 2>/dev/null || true
+    systemctl restart "$unit" 2>/dev/null || true
+  else
+    log "[!] No systemd unit detected; using CLI restart instead."
+    sudo -u "$SPLUNK_USER" "$INSTALL_DIR/bin/splunk" restart || true
+  fi
 }
 
 wait_for_splunkd() {
@@ -220,17 +232,15 @@ final_status() {
   log "STATUS CHECK:"
   sudo -u "$SPLUNK_USER" "$INSTALL_DIR/bin/splunk" status || true
   echo ""
-  log "FORWARD SERVER (from outputs.conf):"
-  if [[ -f "$INSTALL_DIR/etc/system/local/outputs.conf" ]]; then
-    sed -n '1,200p' "$INSTALL_DIR/etc/system/local/outputs.conf"
-  else
-    log "[!] outputs.conf missing!"
-  fi
+  log "outputs.conf:"
+  sed -n '1,120p' "$INSTALL_DIR/etc/system/local/outputs.conf" || true
   echo ""
-  log "CLI VIEW (may show empty if splunkd isn't ready, but outputs.conf is authoritative):"
+  log "inputs.conf:"
+  sed -n '1,200p' "$INSTALL_DIR/etc/system/local/inputs.conf" || true
+  echo ""
+  log "Forward-server (CLI):"
   sudo -u "$SPLUNK_USER" "$INSTALL_DIR/bin/splunk" list forward-server || true
   log "---------------------------------------------------"
-  log "Tip: If you still see 'Could not send data to output queue', it's almost always connectivity to the indexer on 9997."
 }
 
 main() {
