@@ -224,11 +224,16 @@ start_and_enable() {
   log "[🚀] Starting Splunk UF (first start consumes user-seed.conf)..."
   sudo -u "$SPLUNK_USER" "$INSTALL_DIR/bin/splunk" start --accept-license --answer-yes --no-prompt
 
-  log "[*] Enabling boot-start (systemd)..."
-  "$INSTALL_DIR/bin/splunk" enable boot-start -user "$SPLUNK_USER" --accept-license --answer-yes --no-prompt
+  log "[*] Stopping UF before creating systemd unit (required by Splunk)..."
+  sudo -u "$SPLUNK_USER" "$INSTALL_DIR/bin/splunk" stop || true
+
+  log "[*] Enabling boot-start (systemd) as root..."
+  # MUST be run as root to write unit files, and Splunk MUST be stopped.
+  "$INSTALL_DIR/bin/splunk" enable boot-start -user "$SPLUNK_USER" --accept-license --answer-yes --no-prompt || true
 
   systemctl daemon-reload || true
 
+  # Now start using the unit if it exists, otherwise start via CLI
   local unit
   unit="$(detect_splunk_unit)"
   if [[ -n "$unit" ]]; then
@@ -236,8 +241,8 @@ start_and_enable() {
     systemctl enable "$unit" 2>/dev/null || true
     systemctl restart "$unit" 2>/dev/null || true
   else
-    log "[!] No systemd unit detected; using CLI restart instead."
-    sudo -u "$SPLUNK_USER" "$INSTALL_DIR/bin/splunk" restart || true
+    log "[!] No systemd unit detected; starting via CLI instead."
+    sudo -u "$SPLUNK_USER" "$INSTALL_DIR/bin/splunk" start --answer-yes --no-prompt || true
   fi
 }
 
