@@ -10,6 +10,10 @@ SPLUNK_USER="${SPLUNK_USER:-splunk}"
 INSTALL_DIR="${INSTALL_DIR:-/opt/splunkforwarder}"
 DL_URL="${DL_URL:-https://download.splunk.com/products/universalforwarder/releases/10.0.3/linux/splunkforwarder-10.0.3-adbac1c8811c-linux-amd64.tgz}"
 
+# If SELinux is Enforcing and blocks UF from reading /var/log/*, set this to 1
+# (Only do this if allowed by ROE)
+SET_SELINUX_PERMISSIVE="${SET_SELINUX_PERMISSIVE:-0}"
+
 TMP_TGZ="/tmp/splunkforwarder.tgz"
 MGMT_PORT="8089"
 SERVICE_CANDIDATES=("SplunkForwarder" "splunkforwarder" "splunk-universalforwarder")
@@ -29,19 +33,19 @@ pkg_install() {
     apt-get install -y curl tar netcat-openbsd libcap2-bin >/dev/null
   elif have dnf; then
     dnf -y install curl tar nc libcap rsyslog >/dev/null || dnf -y install curl tar nmap-ncat libcap rsyslog >/dev/null
+    dnf -y install policycoreutils >/dev/null 2>&1 || true
   elif have yum; then
     yum -y install curl tar nc libcap rsyslog >/dev/null
+    yum -y install policycoreutils >/dev/null 2>&1 || true
   else
     log "[!] No supported package manager found. Ensure curl, tar, nc, setcap exist."
   fi
 }
 
 detect_splunk_unit() {
-  # Splunk may create different unit names; detect any existing one
   local unit=""
   unit="$(systemctl list-unit-files --type=service 2>/dev/null | awk '{print $1}' | grep -Ei '^splunk.*(forwarder|universal).*\.service$' | head -n1 || true)"
   if [[ -z "$unit" ]]; then
-    # sometimes "SplunkForwarder.service" exists
     unit="$(systemctl list-unit-files --type=service 2>/dev/null | awk '{print $1}' | grep -E '^SplunkForwarder\.service$' | head -n1 || true)"
   fi
   echo "$unit"
@@ -120,8 +124,6 @@ EOF
 
 write_outputs_inputs() {
   log "[*] Writing outputs.conf (minimal + valid)..."
-
-  # IMPORTANT: remove autoLB (it caused "Invalid key" in your UF build)
   cat > "$INSTALL_DIR/etc/system/local/outputs.conf" <<EOF
 [tcpout]
 defaultGroup = primary_indexer
@@ -162,6 +164,47 @@ sourcetype = linux_audit
 EOF
 }
 
+configure_log_access() {
+  log "[*] Ensuring Splunk user can read system logs (/var/log/*)..."
+
+  # Ensure rsyslog is running so /var/log/messages exists on Fedora
+  if systemctl list-unit-files 2>/dev/null | grep -qi '^rsyslog\.service'; then
+    systemctl enable --now rsyslog >/dev/null 2>&1 || true
+  fi
+
+  # Create dedicated group and add splunk user
+  groupadd -f splunklog
+  usermod -aG splunklog "$SPLUNK_USER" || true
+  usermod -aG systemd-journal "$SPLUNK_USER" 2>/dev/null || true
+
+  # Give group read access (not world-readable)
+  # Only change if files exist; keep scope minimal.
+  for f in /var/log/messages /var/log/secure /var/log/audit/audit.log /var/log/syslog /var/log/auth.log; do
+    if [[ -e "$f" ]]; then
+      chgrp splunklog "$f" 2>/dev/null || true
+      chmod 640 "$f" 2>/dev/null || true
+    fi
+  done
+
+  # Make sure directories are searchable so splunk can traverse paths
+  chmod o+x /var/log 2>/dev/null || true
+  chmod o+x /var/log/audit 2>/dev/null || true
+
+  # SELinux handling (detect + optional permissive)
+  if have getenforce; then
+    local mode
+    mode="$(getenforce || true)"
+    if [[ "$mode" == "Enforcing" ]]; then
+      if [[ "$SET_SELINUX_PERMISSIVE" == "1" ]]; then
+        log "[!] SELinux is Enforcing; switching to Permissive (SET_SELINUX_PERMISSIVE=1)."
+        setenforce 0 || true
+      else
+        log "[!] SELinux is Enforcing. If Splunk still shows cannot_open, either set SET_SELINUX_PERMISSIVE=1 (if allowed) or add a proper SELinux policy."
+      fi
+    fi
+  fi
+}
+
 fix_permissions_caps() {
   log "[*] Setting ownership and capabilities..."
 
@@ -175,10 +218,6 @@ fix_permissions_caps() {
   if [[ -x "$INSTALL_DIR/bin/splunkd" ]]; then
     setcap 'cap_dac_read_search+ep' "$INSTALL_DIR/bin/splunkd" || true
   fi
-
-  if systemctl list-unit-files | grep -qi '^rsyslog\.service'; then
-    systemctl enable --now rsyslog >/dev/null 2>&1 || true
-  fi
 }
 
 start_and_enable() {
@@ -190,7 +229,6 @@ start_and_enable() {
 
   systemctl daemon-reload || true
 
-  # Restart the actual unit name if one exists; otherwise, just CLI restart
   local unit
   unit="$(detect_splunk_unit)"
   if [[ -n "$unit" ]]; then
@@ -232,15 +270,16 @@ final_status() {
   log "STATUS CHECK:"
   sudo -u "$SPLUNK_USER" "$INSTALL_DIR/bin/splunk" status || true
   echo ""
-  log "outputs.conf:"
-  sed -n '1,120p' "$INSTALL_DIR/etc/system/local/outputs.conf" || true
-  echo ""
-  log "inputs.conf:"
-  sed -n '1,200p' "$INSTALL_DIR/etc/system/local/inputs.conf" || true
-  echo ""
   log "Forward-server (CLI):"
   sudo -u "$SPLUNK_USER" "$INSTALL_DIR/bin/splunk" list forward-server || true
+  echo ""
+  log "Monitors (CLI):"
+  sudo -u "$SPLUNK_USER" "$INSTALL_DIR/bin/splunk" list monitor | tail -n 30 || true
+  echo ""
+  log "Recent UF WARN/ERROR (splunkd.log):"
+  tail -n 80 "$INSTALL_DIR/var/log/splunk/splunkd.log" | egrep -i 'WARN|ERROR|cannot_open|Permission denied' || true
   log "---------------------------------------------------"
+  log "Optional smoke test: run -> logger -t CCDC_TEST \"smoke $(date -Is)\""
 }
 
 main() {
@@ -251,6 +290,7 @@ main() {
   download_extract
   seed_creds
   write_outputs_inputs
+  configure_log_access
   fix_permissions_caps
   start_and_enable
   wait_for_splunkd
