@@ -3,13 +3,10 @@
 # Fixes: Infinite loop hang & Silent MSI failures & Windows 11 TLS issues
 # ==============================================================================
 
-#Requires -RunAsAdministrator
-
-# Check if running as admin
+# Check if running as admin - if not, restart as admin
 if (-not ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)) {
-    Write-Host "[!] Script must run as Administrator!" -ForegroundColor Red
-    Write-Host "[!] Right-click PowerShell and select 'Run as Administrator'" -ForegroundColor Yellow
-    Read-Host "Press Enter to exit"
+    Write-Host "[!] Script needs Administrator privileges. Restarting as Administrator..." -ForegroundColor Yellow
+    Start-Process powershell.exe -ArgumentList "-NoProfile -ExecutionPolicy Bypass -File `"$PSCommandPath`"" -Verb RunAs
     exit
 }
 
@@ -43,7 +40,7 @@ $PLAIN_PASS = [System.Runtime.InteropServices.Marshal]::PtrToStringAuto($BSTR)
 Write-Host "`n[*] Downloading Splunk Universal Forwarder MSI..." -ForegroundColor Cyan
 try {
     Invoke-WebRequest -Uri $MSI_URL -OutFile $TEMP_MSI -ErrorAction Stop
-    Write-Host "[✓] Download completed: $TEMP_MSI" -ForegroundColor Green
+    Write-Host "[+] Download completed: $TEMP_MSI" -ForegroundColor Green
 } catch {
     Write-Host "[!] Download Failed!" -ForegroundColor Red
     Write-Host "[!] Error: $($_.Exception.Message)" -ForegroundColor Red
@@ -71,7 +68,7 @@ Write-Host "[*] Installing Splunk Forwarder..." -ForegroundColor Cyan
 $MSIArgs = @(
     "/i", "`"$TEMP_MSI`"",
     "/quiet",
-    "/L*v", "`"$INSTALL_LOG`"",  # <--- Generating Log File
+    "/L*v", "`"$INSTALL_LOG`"",
     "AGREETOLICENSE=Yes",
     "RECEIVING_INDEXER=`"$($SPLUNK_SERVER_IP):$($SPLUNK_RECEIVE_PORT)`"",
     "LAUNCHSPLUNK=1",
@@ -94,7 +91,7 @@ if ($process.ExitCode -ne 0) {
     exit
 }
 
-Write-Host "[✓] Installation completed successfully" -ForegroundColor Green
+Write-Host "[+] Installation completed successfully" -ForegroundColor Green
 
 # --- 3. FIX: Configure inputs.conf (With Timeout) ---
 Write-Host "[*] Configuring inputs.conf (Enabling Windows Logs)..." -ForegroundColor Cyan
@@ -114,8 +111,9 @@ while (-not (Test-Path "$SPLUNK_HOME\etc\system\local")) {
     }
 }
 
-Write-Host "[✓] Installation directory confirmed" -ForegroundColor Green
+Write-Host "[+] Installation directory confirmed" -ForegroundColor Green
 
+# Fixed here-string syntax - MUST start on next line after @"
 $InputsContent = @"
 [default]
 host = $env:COMPUTERNAME
@@ -134,7 +132,7 @@ index = main
 "@
 
 Set-Content -Path $INPUTS_CONF -Value $InputsContent -Force
-Write-Host "[✓] inputs.conf configured" -ForegroundColor Green
+Write-Host "[+] inputs.conf configured" -ForegroundColor Green
 
 # --- 4. Patch server.conf ---
 Write-Host "[*] Patching server.conf to allow login..." -ForegroundColor Cyan
@@ -143,14 +141,14 @@ if (-not (Test-Path $SERVER_CONF)) {
 } else {
     Add-Content -Path $SERVER_CONF -Value "`r`n[general]`r`nallowRemoteLogin = always"
 }
-Write-Host "[✓] server.conf patched" -ForegroundColor Green
+Write-Host "[+] server.conf patched" -ForegroundColor Green
 
 # --- 5. Restart & Verify ---
 Write-Host "[*] Restarting Splunk Service..." -ForegroundColor Cyan
 try {
     Restart-Service -Name SplunkForwarder -Force -ErrorAction Stop
     Start-Sleep -Seconds 5
-    Write-Host "[✓] Service restarted successfully" -ForegroundColor Green
+    Write-Host "[+] Service restarted successfully" -ForegroundColor Green
 } catch {
     Write-Host "[!] Failed to restart service: $($_.Exception.Message)" -ForegroundColor Red
     Write-Host "[*] You may need to restart manually" -ForegroundColor Yellow
